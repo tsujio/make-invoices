@@ -1,0 +1,10 @@
+{
+    "credentials_file_name": "credentials.json",
+    "oauth2_token_file_name": "token.json",
+    "calendar_id": "",
+    "work_day_title": "",
+    "work_start_time": "",
+    "work_spreadsheet_ids": [
+    ],
+    "work_document_template_id": ""
+}
