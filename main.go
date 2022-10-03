@@ -242,7 +242,7 @@ func updateAndDownloadWorkSpreadsheets(ctx context.Context, client *http.Client,
 		if err != nil {
 			log.Fatalf("Failed to read response for export spreadsheet: %v", err)
 		}
-		if err := ioutil.WriteFile(fmt.Sprintf("%s_%s.pdf", spreadsheet.Properties.Title, targetTime.Format("200601")), d, 0666); err != nil {
+		if err := ioutil.WriteFile(fmt.Sprintf("%s%s.pdf", targetTime.Format("200601"), spreadsheet.Properties.Title), d, 0666); err != nil {
 			log.Fatalf("Failed to save spreadsheet pdf: %v", err)
 		}
 	}
