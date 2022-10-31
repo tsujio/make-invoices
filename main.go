@@ -106,14 +106,14 @@ func createAPIClient(ctx context.Context, config *Config) *http.Client {
 	return oauth2Conf.Client(ctx, token)
 }
 
-func getWorkDays(ctx context.Context, client *http.Client, targetTime time.Time, config *Config) []time.Time {
+func getCalendarSchedules(ctx context.Context, client *http.Client, calendarID string, targetTime time.Time, filter func(*calendar.Event) bool) []time.Time {
 	cal, err := calendar.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Failed to create calendar client: %v", err)
 	}
 
-	// Get calendar schedules
-	events, err := cal.Events.List(config.CalendarID).
+	// Fetch calendar items
+	events, err := cal.Events.List(calendarID).
 		ShowDeleted(false).
 		SingleEvents(true).
 		TimeMin(targetTime.AddDate(0, -1, -1).Format(time.RFC3339)).
@@ -121,11 +121,11 @@ func getWorkDays(ctx context.Context, client *http.Client, targetTime time.Time,
 		OrderBy("startTime").
 		Do()
 	if err != nil {
-		log.Fatalf("Failed to retrieve calendar: %v", err)
+		log.Fatalf("Failed to retrieve calendar items: %v", err)
 	}
 
-	// Collect work days
-	workDays := make([]time.Time, 0)
+	// Collect items
+	items := make([]time.Time, 0)
 	for _, item := range events.Items {
 		var date time.Time
 		var err error
@@ -143,12 +143,15 @@ func getWorkDays(ctx context.Context, client *http.Client, targetTime time.Time,
 		if date.Year() != targetTime.Year() || date.Month() != targetTime.Month() {
 			continue
 		}
-		if item.Summary == config.WorkDayTitle {
-			workDays = append(workDays, date)
+
+		if filter != nil && !filter(item) {
+			continue
 		}
+
+		items = append(items, date)
 	}
 
-	return workDays
+	return items
 }
 
 func updateAndDownloadWorkSpreadsheets(ctx context.Context, client *http.Client, targetTime time.Time, workDays []time.Time, config *Config) {
@@ -248,7 +251,7 @@ func updateAndDownloadWorkSpreadsheets(ctx context.Context, client *http.Client,
 	}
 }
 
-func updateAndDownloadWorkDocuments(ctx context.Context, client *http.Client, targetTime time.Time, config *Config) {
+func updateAndDownloadWorkDocuments(ctx context.Context, client *http.Client, targetTime time.Time, publicHolidays []time.Time, config *Config) {
 	drv, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Failed to create drive client: %v", err)
@@ -322,11 +325,20 @@ func updateAndDownloadWorkDocuments(ctx context.Context, client *http.Client, ta
 		if i > 12 || d.Month() != targetTime.Month() {
 			break
 		}
-		switch d.Weekday() {
-		case time.Monday, time.Wednesday, time.Friday:
-			req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%d}}", i), d.Format("1/2")))
-			req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%dHours}}", i), "8"))
-			i++
+		isPublicHoliday := false
+		for _, h := range publicHolidays {
+			if h.Year() == d.Year() && h.Month() == d.Month() && h.Day() == d.Day() {
+				isPublicHoliday = true
+				break
+			}
+		}
+		if !isPublicHoliday {
+			switch d.Weekday() {
+			case time.Monday, time.Wednesday, time.Friday:
+				req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%d}}", i), d.Format("1/2")))
+				req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%dHours}}", i), "8"))
+				i++
+			}
 		}
 		d = d.AddDate(0, 0, 1)
 	}
@@ -389,15 +401,21 @@ func main() {
 
 	client := createAPIClient(ctx, config)
 
-	days := getWorkDays(ctx, client, targetTime, config)
+	workDays := getCalendarSchedules(ctx, client, config.CalendarID, targetTime, func(e *calendar.Event) bool {
+		return e.Summary == config.WorkDayTitle
+	})
 
-	log.Printf("Found %d work days\n", len(days))
+	log.Printf("Found %d work days\n", len(workDays))
 
-	updateAndDownloadWorkSpreadsheets(ctx, client, targetTime, days, config)
+	updateAndDownloadWorkSpreadsheets(ctx, client, targetTime, workDays, config)
 
 	log.Println("Exported spreadsheets")
 
-	updateAndDownloadWorkDocuments(ctx, client, targetTime, config)
+	publicHolidays := getCalendarSchedules(ctx, client, "ja.japanese#holiday@group.v.calendar.google.com", targetTime, nil)
+
+	log.Printf("Found %d public holidays\n", len(publicHolidays))
+
+	updateAndDownloadWorkDocuments(ctx, client, targetTime, publicHolidays, config)
 
 	log.Println("Exported document")
 
