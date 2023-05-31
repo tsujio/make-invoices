@@ -9,15 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/calendar/v3"
-	"google.golang.org/api/docs/v1"
-	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
@@ -251,124 +248,6 @@ func updateAndDownloadWorkSpreadsheets(ctx context.Context, client *http.Client,
 	}
 }
 
-func updateAndDownloadWorkDocuments(ctx context.Context, client *http.Client, targetTime time.Time, publicHolidays []time.Time, config *Config) {
-	drv, err := drive.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Failed to create drive client: %v", err)
-	}
-
-	// Get template document
-	template, err := drv.Files.Get(config.WorkDocumentTemplateID).Fields("parents, id, name").Do()
-	if err != nil {
-		log.Fatalf("Failed to get template: %v", err)
-	}
-
-	folderID := template.Parents[0]
-
-	targetDocumentName := strings.Replace(template.Name, "yyyymm", targetTime.Format("200601"), 1)
-
-	// Delete document for targetTime if exists
-	var nextPageToken string
-	for {
-		files, err := drv.Files.List().Fields("nextPageToken, files(id, name)").
-			Q(fmt.Sprintf("'%s' in parents", folderID)).
-			PageToken(nextPageToken).
-			Do()
-		if err != nil {
-			log.Fatalf("Failed to retrieve files from drive: %v", err)
-		}
-		for _, f := range files.Files {
-			if f.Name == targetDocumentName {
-				if err := drv.Files.Delete(f.Id).Do(); err != nil {
-					log.Fatalf("Failed to delete existing document: %v", err)
-				}
-			}
-		}
-		if files.NextPageToken == "" {
-			break
-		}
-		nextPageToken = files.NextPageToken
-	}
-
-	// Create document for targetTime by copying template
-	f, err := drv.Files.Copy(config.WorkDocumentTemplateID, &drive.File{
-		Name:    targetDocumentName,
-		Parents: []string{folderID},
-	}).Do()
-	if err != nil {
-		log.Fatalf("Failed to copy template: %v", err)
-	}
-
-	// Replace placeholders in document
-	doc, err := docs.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Failed to create docs client: %v", err)
-	}
-	makeReplaceRequest := func(key, value string) *docs.Request {
-		return &docs.Request{
-			ReplaceAllText: &docs.ReplaceAllTextRequest{
-				ContainsText: &docs.SubstringMatchCriteria{
-					Text: key,
-				},
-				ReplaceText: value,
-			},
-		}
-	}
-	req := []*docs.Request{
-		makeReplaceRequest("{{year}}", targetTime.Format("2006")),
-		makeReplaceRequest("{{month}}", targetTime.Format("1")),
-		makeReplaceRequest("{{day}}", targetTime.AddDate(0, 1, -1).Format("2")),
-	}
-	d := targetTime
-	i := 1
-	for {
-		if i > 12 || d.Month() != targetTime.Month() {
-			break
-		}
-		isPublicHoliday := false
-		for _, h := range publicHolidays {
-			if h.Year() == d.Year() && h.Month() == d.Month() && h.Day() == d.Day() {
-				isPublicHoliday = true
-				break
-			}
-		}
-		if !isPublicHoliday {
-			switch d.Weekday() {
-			case time.Monday, time.Wednesday, time.Friday:
-				req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%d}}", i), d.Format("1/2")))
-				req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%dHours}}", i), "8"))
-				i++
-			}
-		}
-		d = d.AddDate(0, 0, 1)
-	}
-	req = append(req, makeReplaceRequest("{{totalHours}}", strconv.Itoa((i-1)*8)))
-	for i <= 12 {
-		req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%d}}", i), ""))
-		req = append(req, makeReplaceRequest(fmt.Sprintf("{{day%dHours}}", i), ""))
-		i++
-	}
-	if _, err := doc.Documents.BatchUpdate(f.Id, &docs.BatchUpdateDocumentRequest{
-		Requests: req,
-	}).Do(); err != nil {
-		log.Fatalf("Failed to update document: %v", err)
-	}
-
-	// Export to pdf
-	resp, err := drv.Files.Export(f.Id, "application/pdf").Download()
-	if err != nil {
-		log.Fatalf("Failed to export document: %v", err)
-	}
-	defer resp.Body.Close()
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("Failed to read response for export document: %v", err)
-	}
-	if err := ioutil.WriteFile(fmt.Sprintf("%s.pdf", f.Name), data, 0666); err != nil {
-		log.Fatalf("Failed to save document pdf: %v", err)
-	}
-}
-
 func main() {
 	jst, err := time.LoadLocation("Asia/Tokyo")
 	if err != nil {
@@ -410,14 +289,6 @@ func main() {
 	updateAndDownloadWorkSpreadsheets(ctx, client, targetTime, workDays, config)
 
 	log.Println("Exported spreadsheets")
-
-	publicHolidays := getCalendarSchedules(ctx, client, "ja.japanese#holiday@group.v.calendar.google.com", targetTime, nil)
-
-	log.Printf("Found %d public holidays\n", len(publicHolidays))
-
-	updateAndDownloadWorkDocuments(ctx, client, targetTime, publicHolidays, config)
-
-	log.Println("Exported document")
 
 	log.Println("Done")
 }
